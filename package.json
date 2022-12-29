@@ -1,0 +1,14 @@
+{
+  "name": "taskrouter-engine",
+  "version": "1.0.0",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.1.3",
+    "express": "^4.17.1",
+    "serverless-http": "^2.7.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "serverless-lift": "^1.20.2"
+  }
+}

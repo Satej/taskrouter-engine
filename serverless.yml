@@ -1,0 +1,444 @@
+app: task-engine
+service: taskrouter-engine
+frameworkVersion: '3'
+
+custom:
+  tasksTableName: 'tasks-table-${sls:stage}'
+  workersTableName: 'workers-table-${sls:stage}'  
+  reservationsTableName: 'reservations-table-${sls:stage}'
+  reservationsTimeoutTableName: 'reservations-timeout-table-${sls:stage}'
+  queuesTableName: 'queues-table-${sls:stage}'
+  workspacesTableName: 'workspaces-table-${sls:stage}'
+  activitiesTableName: 'activities-table-${sls:stage}'
+  eventsTableName: 'events-table-${sls:stage}'
+  workflowsTableName: 'workflows-table-${sls:stage}'
+  workerAttributesTableName: 'worker-attributes-table-${sls:stage}'
+  workerQueueTableName: 'worker-queue-table-${sls:stage}'
+  eventsQueueName: 'events-queue-${sls:stage}'
+
+provider:
+  name: aws
+  runtime: nodejs16.x
+  region: ap-south-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:DescribeStream
+            - dynamodb:GetRecords
+            - dynamodb:GetShardIterator
+            - dynamodb:ListStreams
+          Resource:
+            - Fn::GetAtt: [ WorkersTable, Arn ]
+            - Fn::Join:
+              - "/"
+              -
+                - { "Fn::GetAtt": ["WorkersTable", "Arn" ] }
+                - "index/*"
+            - Fn::GetAtt: [ ReservationsTable, Arn ]
+            - Fn::GetAtt: [ ReservationsTimeoutTable, Arn ]
+            - Fn::GetAtt: [ TasksTable, Arn ]
+            - Fn::GetAtt: [ WorkspacesTable, Arn ]
+            - Fn::GetAtt: [ QueuesTable, Arn ]
+            - Fn::GetAtt: [ ActivitiesTable, Arn ]
+            - Fn::GetAtt: [ EventsTable, Arn ]
+            - Fn::GetAtt: [ WorkflowsTable, Arn ]
+            - Fn::GetAtt: [ WorkerAttributesTable, Arn ]
+            - Fn::GetAtt: [ WorkerQueueTable, Arn ]
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:GetQueueUrl
+          Resource:
+            - Fn::GetAtt: [ EventsQueue, Arn ]
+  environment:
+    TASKS_TABLE: ${self:custom.tasksTableName}
+    WORKERS_TABLE: ${self:custom.workersTableName}
+    QUEUES_TABLE: ${self:custom.queuesTableName}
+    WORKSPACES_TABLE: ${self:custom.workspacesTableName}
+    RESERVATIONS_TABLE: ${self:custom.reservationsTableName}
+    RESERVATIONS_TIMEOUT_TABLE: ${self:custom.reservationsTimeoutTableName}
+    ACTIVITIES_TABLE: ${self:custom.activitiesTableName}
+    EVENTS_TABLE: ${self:custom.eventsTableName}
+    WORKFLOWS_TABLE: ${self:custom.workflowsTableName}
+    WORKER_ATTRIBUTES_TABLE: ${self:custom.workerAttributesTableName}
+    WORKER_QUEUE_TABLE: ${self:custom.workerQueueTableName}
+    QUEUE_URL: { Ref: EventsQueue }
+
+functions:
+  removeTimedoutReservations:
+    handler: handler.removeTimedoutReservations
+    timeout: 60
+    events:
+      - schedule:
+          rate: rate(1 minute)
+          enabled: false
+
+  workerStream:
+    handler: handler.workerStreamConsumer
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [ WorkersTable, StreamArn ]
+
+  taskStream:
+    handler: handler.taskStreamConsumer
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [ TasksTable, StreamArn ]
+
+  reservationStream:
+    handler: handler.reservationStreamConsumer
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [ ReservationsTable, StreamArn ]
+
+  reservationTimeoutStream:
+    handler: handler.reservationTimeoutStreamConsumer
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [ ReservationsTimeoutTable, StreamArn ]
+
+  api:
+    handler: handler.handler
+    events:
+      - httpApi: '*'
+
+  eventsProcessor:
+    handler: handler.processEvents
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - EventsQueue
+              - Arn
+
+resources:
+  Resources:
+    EventsQueue:
+      Type: "AWS::SQS::Queue"
+      Properties:
+        QueueName: ${self:custom.eventsQueueName}
+    WorkersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: isAvailable
+            AttributeType: S
+          - AttributeName: dateCreated
+            AttributeType: S
+          - AttributeName: lastAssignedDate
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: id
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: Tasks-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: isAvailable
+                KeyType: HASH
+              - AttributeName: dateCreated
+                KeyType: RANGE
+          - IndexName: lastAssignedDateIndex
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: isAvailable
+                KeyType: HASH
+              - AttributeName: lastAssignedDate
+                KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.workersTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    TasksTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: currentStatus
+            AttributeType: S
+          - AttributeName: dateCreated
+            AttributeType: S
+          - AttributeName: queueId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: id
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: Tasks-isAvailable-dateCreated-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: currentStatus
+                KeyType: HASH
+              - AttributeName: dateCreated
+                KeyType: RANGE
+          - IndexName: Tasks-queueId-status-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: queueId
+                KeyType: HASH
+              - AttributeName: currentStatus
+                KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.tasksTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    WorkflowsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: id
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.workflowsTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    QueuesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: id
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.queuesTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    WorkerAttributesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: attributeName
+            AttributeType: S
+          - AttributeName: attributeValue
+            AttributeType: S
+          - AttributeName: workerId
+            AttributeType: S
+          - AttributeName: workspaceId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: workerId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: WorkerAttributes-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: attributeName
+                KeyType: HASH
+              - AttributeName: attributeValue
+                KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.workerAttributesTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    WorkerQueueTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: queueId
+            AttributeType: S
+          - AttributeName: workerId
+            AttributeType: S
+          - AttributeName: workspaceId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: queueId
+            KeyType: HASH
+          - AttributeName: workerId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: WorkerId-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: workerId
+                KeyType: HASH
+              - AttributeName: workspaceId
+                KeyType: RANGE
+          - IndexName: QueueId-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: queueId
+                KeyType: HASH
+              - AttributeName: workspaceId
+                KeyType: RANGE
+          - IndexName: QueueId-WorkerId-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: workspaceId
+                KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.workerQueueTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    ReservationsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: id
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.reservationsTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    ReservationsTimeoutTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: reservationId
+            AttributeType: S
+          - AttributeName: ttl
+            AttributeType: N
+          - AttributeName: timeout
+            AttributeType: N
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: reservationId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: ttl-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: ttl
+                KeyType: HASH
+          - IndexName: timeout-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: timeout
+                KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.reservationsTimeoutTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    ActivitiesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: isAvailable
+            AttributeType: S
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: Activities-isAvailable-workspaceId-index
+            Projection:
+              ProjectionType: ALL
+            KeySchema:
+              - AttributeName: workspaceId
+                KeyType: HASH
+              - AttributeName: isAvailable
+                KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.activitiesTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    EventsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: workspaceId
+            AttributeType: S
+          - AttributeName: dateCreated
+            AttributeType: S
+        KeySchema:
+          - AttributeName: workspaceId
+            KeyType: HASH
+          - AttributeName: dateCreated
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.eventsTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+    WorkspacesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.workspacesTableName}
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+
+plugins:
+  - serverless-lift
